@@ -108,6 +108,8 @@ class HybridDialogueDataset():
     def get_page_data(self, key):
         # Internal
         file_name = self.ott_data_dir + get_hash(key) + '.json'
+        # file_name = self.ott_data_dir + key + '.json'
+
         # check page doens't exist in the dataset
         if not os.path.isfile(file_name):
             # print('page DNE', key)
