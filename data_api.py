@@ -39,7 +39,8 @@ class HybridDialogueDataset():
         self.all_candidates = self.all_data['all_candidates']
         self.turns = self.all_data['qas']
 
-        self.ott_data_dir = '../../Conv_generated_json_files/'
+        # self.ott_data_dir = '../../Conv_generated_json_files/'
+        self.ott_data_dir = '../OTT-QA/data/combined_jsons/'
 
     def get_all_candidates(self):
         """
@@ -157,7 +158,7 @@ class HybridDialogueDataset():
             if table['uid'] == table_key:
                 found_match = True
                 break
-        
+
         assert found_match
 
         table_data = []
@@ -166,7 +167,8 @@ class HybridDialogueDataset():
             for cell in row:
                 # one cell may have multiple URLs so we loop thru each
                 # group of (txt, url)
-                txts = cell[0]
+                # txts = cell[0] # This was giving weird results, changed to list 
+                txts = [cell[0]]
                 urls = cell[1]
                 cell_txt = ""
                 for txt, url in zip(txts, urls):
@@ -180,6 +182,7 @@ class HybridDialogueDataset():
                 cell_txt = cell_txt[:-2] # remove the " , " at the end of the string
                 row_data.append(cell_txt)
             table_data.append(row_data)
+        
         headers = [' '.join(cell[0]) for cell in table['header']]
         df = pd.DataFrame(table_data, columns=headers)
         return df, table_data
