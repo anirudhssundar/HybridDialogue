@@ -69,12 +69,13 @@ if __name__ == "__main__":
 
     # Getting a turn:
     turn0 = dataset.get_turn(turn_ids[0])
+
     dataset.ott_data_dir = '../OTT-QA/data/combined_jsons/'
     dataset.orig_data_dir = '../OTT-QA/data/traindev_tables_tok/'
     dataset.orig_wiki_data_dir = '../OTT-QA/data/traindev_request_tok/'
 
     # rename_jsons_page_key(dataset)
-    create_passage_jsons(dataset)
+    # create_passage_jsons(dataset)
 
 
 
