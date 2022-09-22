@@ -1,6 +1,7 @@
 import json
 from data_api import HybridDialogueDataset, get_hash
 import os
+from rank_bm25 import BM25Okapi
 
 
 def rename_jsons_page_key(dataset):
@@ -54,6 +55,55 @@ def create_passage_jsons(dataset):
             with open(hashed_file, 'w') as f:
                 f.write(write_object)
 
+
+def prep_file_names(file_name):
+    split_name = file_name.split('.json', 1)[0]
+    page_name = split_name.rsplit('_', 1)[0]
+    page_name = page_name.replace("_", ' ')
+    page_name = page_name.lower()
+    return page_name
+
+
+def passage_ranking(query, dataset):
+    files = list(os.listdir(dataset.orig_data_dir))
+    files_prepped = list(map(lambda x: prep_file_names(x), files))
+    tokenized_corpus = [doc.split(" ") for doc in files_prepped]
+    bm25 = BM25Okapi(tokenized_corpus)
+
+    query = query.lower()
+    tokenized_query = query.split(" ")
+    doc_scores = bm25.get_scores(tokenized_query)
+    top_result = ' '.join(bm25.get_top_n(tokenized_query, tokenized_corpus, n=1)[0])
+    return top_result
+
+
+def get_rank(query, correct_source, num_retrieve=10):
+    files = list(os.listdir(dataset.orig_data_dir))
+    files_prepped = list(map(lambda x: prep_file_names(x), files))
+    tokenized_corpus = [doc.split(" ") for doc in files_prepped]
+    bm25 = BM25Okapi(tokenized_corpus)
+
+    query = query.lower()
+    tokenized_query = query.split(" ")
+    results = bm25.get_top_n(tokenized_query, tokenized_corpus, n=num_retrieve)
+    results = list(map(lambda x: ' '.join(x), results))
+
+    if correct_source not in results:
+        return num_retrieve + 1
+    else:
+        return results.index(correct_source) + 1
+
+
+
+
+
+
+    return top_result
+
+
+    
+
+
         
 
 
@@ -76,6 +126,45 @@ if __name__ == "__main__":
 
     # rename_jsons_page_key(dataset)
     # create_passage_jsons(dataset)
+
+    # Evaluate retriever
+    acc = 0
+    evaluated_conversations = []
+
+    error_turns = []
+    MRR = 0
+
+    for turn_id in turn_ids:
+        turn = dataset.get_turn(turn_id)
+        if turn['conversation_id'] in evaluated_conversations:
+            continue
+        
+        evaluated_conversations.append(turn['conversation_id'])
+        query = turn['current_query']
+
+        correct_candidate = candidates[turn['correct_next_cands_ids'][0]]
+
+        correct_source = correct_candidate['page_key'] or correct_candidate['table_key'].rsplit('_', 1)[0]
+
+        correct_source = correct_source.replace("_", ' ')
+        correct_source = correct_source.lower()
+
+        # Calculate top-1 accuracy 
+        # retrieved_source = passage_ranking(query, dataset)
+        # if retrieved_source == correct_source:
+        #     acc += 1
+        
+        # Error analysis 
+        # if retrieved_source != correct_source:
+        #     error_turns.append(turn_id)
+
+        # Mean reciprocal rank
+
+        rank_source = get_rank(query, correct_source, num_retrieve=10)
+        MRR += 1/(rank_source)
+
+
+    
 
 
 
