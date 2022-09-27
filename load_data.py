@@ -1,7 +1,9 @@
 import json
+from tkinter import dialog
 from data_api import HybridDialogueDataset, get_hash
 import os
 from rank_bm25 import BM25Okapi
+from sentence_transformers import SentenceTransformer
 
 
 def rename_jsons_page_key(dataset):
@@ -72,7 +74,7 @@ def passage_ranking(query, dataset):
 
     query = query.lower()
     tokenized_query = query.split(" ")
-    doc_scores = bm25.get_scores(tokenized_query)
+    # doc_scores = bm25.get_scores(tokenized_query)
     top_result = ' '.join(bm25.get_top_n(tokenized_query, tokenized_corpus, n=1)[0])
     return top_result
 
@@ -94,14 +96,75 @@ def get_rank(query, correct_source, num_retrieve=10):
         return results.index(correct_source) + 1
 
 
+def error_analysis(turn_id, dataset, num_retrieve=10):
+    turn = dataset.get_turn(turn_id)
+    query = turn['current_query']
+    correct_candidate = candidates[turn['correct_next_cands_ids'][0]]
+
+    correct_source = correct_candidate['page_key'] or correct_candidate['table_key'].rsplit('_', 1)[0]
+
+    correct_source = correct_source.replace("_", ' ').lower()
+    # correct_source = correct_source.lower()
+    files = list(os.listdir(dataset.orig_data_dir))
+    files_prepped = list(map(lambda x: prep_file_names(x), files))
+    tokenized_corpus = [doc.split(" ") for doc in files_prepped]
+    bm25 = BM25Okapi(tokenized_corpus)
+
+    query = query.lower()
+    tokenized_query = query.split(" ")
+    results = bm25.get_top_n(tokenized_query, tokenized_corpus, n=num_retrieve)
+    results = list(map(lambda x: ' '.join(x), results))
+
+    print(f"query: {query}")
+    print(f"correct source: {correct_source}")
+    print(f"results:{results}") 
 
 
-
-
-    return top_result
+def answer_retrieval():
+    model = SentenceTransformer('all-MiniLM-L6-v2')
 
 
     
+def process_data(dataset):
+    conversations = dataset.get_conversations(mode='train')
+    candidates = dataset.get_all_candidates()
+    turn_ids = dataset.get_turn_ids(mode="train")
+    turns = dataset.get_turns(mode="train")
+
+    for key, turn_keys in conversations.items():
+        dialogue_history = ''
+        data_points = []
+        for i,turn_key in enumerate(turn_keys):
+            if i == 0:
+                turn = turns[turn_key]
+                query = turn['current_query']
+                response = turn['long_response_to_query']
+                dialogue_history += query + ' '
+                dialogue_history += response + ' ' 
+                continue  # No need to pick the right reference 
+
+            else: 
+                turn = turns[turn_key]
+                query = turn['current_query']
+
+                H = dialogue_history + query + ' ' 
+                correct_reference = turn['correct_next_cands_ids'][0]
+                correct_reference_linearized = candidates[correct_reference]['linearized_input']
+                
+                incorrect_references = turn['possible_next_cands_ids']
+                if correct_reference in incorrect_references:
+                    incorrect_references = turn['possible_next_cands_ids'].remove(correct_reference)
+
+                for incorrect_reference in incorrect_references:
+                    incorrect_reference_linearized = candidates[incorrect_reference]['linearized_input']
+                    data_point = [H, correct_reference_linearized, incorrect_reference_linearized]
+                    data_points.append(data_point)
+
+                response = turn['long_response_to_query']
+                dialogue_history += response + ' ' 
+
+        break
+
 
 
         
@@ -146,8 +209,7 @@ if __name__ == "__main__":
 
         correct_source = correct_candidate['page_key'] or correct_candidate['table_key'].rsplit('_', 1)[0]
 
-        correct_source = correct_source.replace("_", ' ')
-        correct_source = correct_source.lower()
+        correct_source = correct_source.replace("_", ' ').lower()
 
         # Calculate top-1 accuracy 
         # retrieved_source = passage_ranking(query, dataset)
@@ -162,6 +224,7 @@ if __name__ == "__main__":
 
         rank_source = get_rank(query, correct_source, num_retrieve=10)
         MRR += 1/(rank_source)
+
 
 
     
