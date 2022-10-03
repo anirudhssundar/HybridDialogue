@@ -2,7 +2,7 @@ import json
 from data_api import HybridDialogueDataset, get_hash
 import os
 from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, InputExample
 import torch
 from torch.utils.data import Dataset
 import pandas as pd
@@ -68,7 +68,7 @@ def prep_file_names(file_name):
     return page_name
 
 
-class HybridDialogue_DataLoader(Dataset):
+class HybridDialogue_Triplets(Dataset):
     def __init__(self, data_file, transform=None):
         self.data = pd.read_csv(data_file)
 
@@ -79,8 +79,9 @@ class HybridDialogue_DataLoader(Dataset):
         history = self.data.iloc[idx, 0]
         correct = self.data.iloc[idx, 1]
         incorrect = self.data.iloc[idx, 2]
-
-        return history, correct, incorrect
+        examples = InputExample(texts=[history, correct, incorrect])
+        # return history, correct, incorrect
+        return examples
 
 
 

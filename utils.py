@@ -3,11 +3,12 @@ import json
 import tqdm
 import pandas as pd
 
-def create_triplet_samples(dataset):
-    conversations = dataset.get_conversations(mode='train')
+# Creates data sample triplets 
+def create_triplet_samples(dataset, mode='train'):
+    conversations = dataset.get_conversations(mode=mode)
     candidates = dataset.get_all_candidates()
-    turn_ids = dataset.get_turn_ids(mode="train")
-    turns = dataset.get_turns(mode="train")
+    turn_ids = dataset.get_turn_ids(mode=mode)
+    turns = dataset.get_turns(mode=mode)
 
     # data_points = []
     data_points = pd.DataFrame()

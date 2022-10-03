@@ -1,14 +1,33 @@
 from transformers import AdamW
-from sentence_transformers import SentenceTransformer
-from transformers import BertTokenizer
+from sentence_transformers import SentenceTransformer, InputExample, losses
+# from transformers import BertTokenizer
 
-from transformers import AutoTokenizer, AutoModel
+# from transformers import AutoTokenizer, AutoModel
 import torch
 import torch.nn.functional as F
+from load_data import HybridDialogue_Triplets
+from torch.utils.data import Dataset, DataLoader
+import pandas as pd
 
 
-model = SentenceTransformer('all-MiniLM-L6-v2')
-optimizer = AdamW(model.parameters(), lr=1e-5)
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+model = SentenceTransformer('all-MiniLM-L6-v2').to(device)
+optimizer = torch.optim.Adam(model.parameters())
+
+training_data = HybridDialogue_Triplets('triplet_samples.csv')
+train_dataloader = DataLoader(training_data, batch_size=64, shuffle=True)
+train_loss = losses.TripletLoss(model)
+
+for i, batch in enumerate(train_dataloader):
+    history = batch[0]
+    correct_reference = batch[1]
+    incorrect_reference = batch[2]
+    
+
+    # train_example = [InputExample(texts=[history, correct_reference, incorrect_reference])]
+model.fit(train_objectives=[(train_dataloader, train_loss)], epochs=1, warmup_steps=100)
+
 
 #Mean Pooling - Take attention mask into account for correct averaging
 def mean_pooling(model_output, attention_mask):
@@ -26,3 +45,5 @@ encoded_input = tokenizer(sentences, padding=True, truncation=True, return_tenso
 # Compute token embeddings
 with torch.no_grad():
     model_output = model(**encoded_input)
+
+
