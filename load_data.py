@@ -6,6 +6,7 @@ from sentence_transformers import SentenceTransformer, InputExample
 import torch
 from torch.utils.data import Dataset
 import pandas as pd
+import metrics 
 
 
 def rename_jsons_page_key(dataset):
@@ -85,6 +86,26 @@ class HybridDialogue_Triplets(Dataset):
 
 
 
+def get_rank(query, correct_source, num_retrieve=10):
+
+    dataset = HybridDialogueDataset()
+    dataset.orig_data_dir = '../OTT-QA/data/traindev_tables_tok/'
+
+    files = list(os.listdir(dataset.orig_data_dir))
+    files_prepped = list(map(lambda x: prep_file_names(x), files))
+    tokenized_corpus = [doc.split(" ") for doc in files_prepped]
+    bm25 = BM25Okapi(tokenized_corpus)
+
+    query = query.lower()
+    tokenized_query = query.split(" ")
+    results = bm25.get_top_n(tokenized_query, tokenized_corpus, n=num_retrieve)
+    results = list(map(lambda x: ' '.join(x), results))
+
+    if correct_source not in results:
+        return num_retrieve + 1
+    else:
+        return results.index(correct_source) + 1
+
 
 
 
@@ -111,8 +132,10 @@ if __name__ == "__main__":
     # Evaluate retriever
     acc = 0
     evaluated_conversations = []
-
+    queries = []
+    correct_sources = []
     error_turns = []
+    retrievals = []
     MRR = 0
 
     for turn_id in turn_ids:
@@ -122,26 +145,29 @@ if __name__ == "__main__":
         
         evaluated_conversations.append(turn['conversation_id'])
         query = turn['current_query']
+        queries.append(query)
 
         correct_candidate = candidates[turn['correct_next_cands_ids'][0]]
 
         correct_source = correct_candidate['page_key'] or correct_candidate['table_key'].rsplit('_', 1)[0]
 
         correct_source = correct_source.replace("_", ' ').lower()
+        correct_sources.append(correct_source)
+        # ret = turn['']
 
         # Calculate top-1 accuracy 
-        # retrieved_source = passage_ranking(query, dataset)
+        retrieved_source = metrics.passage_ranking(query, dataset)
         # if retrieved_source == correct_source:
         #     acc += 1
         
         # Error analysis 
-        # if retrieved_source != correct_source:
-        #     error_turns.append(turn_id)
+        if retrieved_source != correct_source:
+            error_turns.append(turn_id)
 
         # Mean reciprocal rank
 
-        rank_source = get_rank(query, correct_source, num_retrieve=10)
-        MRR += 1/(rank_source)
+        # rank_source = get_rank(query, correct_source, num_retrieve=10)
+        # MRR += 1/(rank_source)
 
 
 

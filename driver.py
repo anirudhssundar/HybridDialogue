@@ -5,6 +5,7 @@ from load_data import HybridDialogue_Triplets
 from torch.utils.data import DataLoader
 from sentence_transformers import SentenceTransformer, models
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import RobertaTokenizer, RobertaModel
 
 if __name__ == "__main__":
     # Create the triplet samples csv file
@@ -20,10 +21,15 @@ if __name__ == "__main__":
     #    history, correct, incorrect = batch
     #    break
 
-    dataset = HybridDialogueDataset()
+    # Create the dialogue turns file
+    
+    # dataset = HybridDialogueDataset()
 
-    tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-small")
-    model = AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-small")
+    # tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-small")
+    # model = AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-small")
 
-    data_points = utils.create_dialogue_turns(dataset, tokenizer, mode='train')
-    data_points.to_csv('dialogue_samples.csv', index=False)
+    # data_points = utils.create_dialogue_turns(dataset, tokenizer, mode='train')
+    # data_points.to_csv('dialogue_samples.csv', index=False)
+
+
+

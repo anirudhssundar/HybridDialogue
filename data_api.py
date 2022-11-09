@@ -182,7 +182,7 @@ class HybridDialogueDataset():
                 cell_txt = cell_txt[:-2] # remove the " , " at the end of the string
                 row_data.append(cell_txt)
             table_data.append(row_data)
-        
+
         headers = [' '.join(cell[0]) for cell in table['header']]
         df = pd.DataFrame(table_data, columns=headers)
         return df, table_data
