@@ -7,8 +7,11 @@ from torch.utils.data import Dataset, DataLoader
 import torch
 import torch.nn as nn 
 from torch.optim import Adam, AdamW
+from transformers import get_scheduler
 from loss import NTXentLoss
+import pdb
 
+utils.seed_everything(seed=42)
 
 class Passage_Positive_Anchors_Dataset(Dataset):
     def __init__(self, positive_embeddings, anchor_embeddings):
@@ -33,8 +36,15 @@ class PQCLR(nn.Module):
         self.question_encoder = RobertaModel.from_pretrained('roberta-base').to(device)
     
     def forward(self, positives, anchors):
-        out_pos = self.passage_encoder(positives).pooler_output
-        out_anch = self.question_encoder(anchors).pooler_output
+        # out_pos = self.passage_encoder(positives).pooler_output
+        # out_anch = self.question_encoder(anchors).pooler_output
+
+        # Using average of the output instead of cls
+        out_pos = self.passage_encoder(positives).last_hidden_state
+        out_anch = self.passage_encoder(anchors).last_hidden_state
+
+        out_pos = torch.mean(out_pos, dim=1)
+        out_anch = torch.mean(out_anch, dim=1)
 
         return out_pos, out_anch
 
@@ -83,6 +93,7 @@ for key,candidate in candidates.items():
 top_level_info_df = utils.create_table_top_level_info(dataset) # pandas df containing tables and their corresponding information
 
 correct_sources = utils.generate_correct_sources_list(dataset, mode='train')
+val_correct_sources = utils.generate_correct_sources_list(dataset, mode='validate')
 
 # Generate the contrastive pairs for learning embeddings 
 
@@ -134,6 +145,38 @@ for turn_id in tqdm.tqdm(turn_ids, desc='Generating pairs'):
     # repeated_query = [query]*len(incorrect_sources) # Repeat to number of negatives
     # anchors.extend(repeated_query)
 
+val_conversations = dataset.get_conversations(mode='validate')
+val_turn_ids = dataset.get_turn_ids(mode="validate")
+val_turns = dataset.get_turns(mode="validate")
+val_positives = []
+val_anchors = []
+
+for val_turn_id in tqdm.tqdm(val_turn_ids, desc='Generating pairs'):
+    val_turn = dataset.get_turn(val_turn_id)
+    if val_turn['conversation_id'] in evaluated_val_conversations:
+        continue # Only looking at the first turns 
+    
+    evaluated_val_conversations.append(val_turn['conversation_id'])
+    query = val_turn['current_query']
+
+    correct_candidate = candidates[val_turn['correct_next_cands_ids'][0]]
+
+    correct_source = correct_candidate['page_key'] or correct_candidate['table_key'].rsplit('_', 1)[0]
+    correct_source = correct_source.replace("_", ' ').lower()
+
+    possible_candidates = top_level_info_df[top_level_info_df['titles']==correct_source]
+    if len(possible_candidates) > 1: # Multiple tables for this question exist, need to select the correct one
+        if correct_candidate['table_key'] is not None:
+            correct_id = int(correct_candidate['table_key'].rsplit('_', 1)[1])
+            correct_info = list(possible_candidates[possible_candidates['id']==correct_id]['info'])[0]
+        else:
+            correct_info = possible_candidates.iloc[0]['info']
+    else:
+        correct_info = possible_candidates.iloc[0]['info']
+
+    val_positives.append(correct_info)
+    val_anchors.append(query)
+
 def preprocess_function(examples):
    #function to tokenize the dataset
    return tokenizer(examples, truncation=True, padding=True, return_tensors='pt')['input_ids']
@@ -142,30 +185,46 @@ def preprocess_function(examples):
 positive_encodings = tokenizer(positives, padding=True, truncation=True, return_tensors='pt')['input_ids']
 anchor_encodings = tokenizer(anchors, padding=True, truncation=True, return_tensors='pt')['input_ids']
 
+val_positive_encodings = tokenizer(val_positives, padding=True, truncation=True, return_tensors='pt')['input_ids']
+val_anchor_encodings = tokenizer(val_anchors, padding=True, truncation=True, return_tensors='pt')['input_ids']
+
 passage_dataset = Passage_Positive_Anchors_Dataset(positive_embeddings=positive_encodings, anchor_embeddings=anchor_encodings)
+val_passage_dataset = Passage_Positive_Anchors_Dataset(positive_embeddings=val_positive_encodings, anchor_embeddings=val_anchor_encodings)
 
 batch_size=16
+num_epochs = 20
 
 train_dataloader = DataLoader(passage_dataset, batch_size=batch_size, shuffle=True)
+val_dataloader = DataLoader(val_passage_dataset, batch_size=len(val_passage_dataset), shuffle=False)
 
 model = PQCLR(device=device)
 model = model.train()
 
-opt1 = Adam(model.passage_encoder.parameters(), lr=1e-5)
-opt2 = Adam(model.question_encoder.parameters(), lr=1e-5)
-loss_fn = NTXentLoss(device=device, batch_size=batch_size, temperature=0.5, use_cosine_similarity=False, alpha_weight=1)
+opt1 = Adam(model.passage_encoder.parameters(), lr=1e-6)
+opt2 = Adam(model.question_encoder.parameters(), lr=1e-6)
 
+num_training_steps = num_epochs * len(train_dataloader)
 
-for epoch in tqdm.trange(10):
+lr_scheduler_1 = get_scheduler(name="linear", optimizer=opt1, num_warmup_steps=5, num_training_steps=num_training_steps)
+lr_scheduler_2 = get_scheduler(name="linear", optimizer=opt2, num_warmup_steps=5, num_training_steps=num_training_steps)
+
+loss_fn = NTXentLoss(device=device, batch_size=batch_size, temperature=1, use_cosine_similarity=False, alpha_weight=1)
+gold_answers = torch.arange(242).to(device)
+
+for epoch in tqdm.trange(num_epochs):
     loss_avg = 0
     num_exp = 0
-    for i, batch in enumerate(train_dataloader):
-        pos,anch = batch[0].clone().detach().to(device), batch[1].clone().detach().to(device)
-        pos_emb, anch_emb = model(pos, anch)
 
+    top_3_acc = 0
+
+    model = model.train()
+    for i, batch in enumerate(train_dataloader):
         opt1.zero_grad()
         opt2.zero_grad()
-
+        
+        pos,anch = batch[0].clone().detach().to(device), batch[1].clone().detach().to(device)
+        pos_emb, anch_emb = model(pos, anch)
+        # pdb.set_trace()
         loss_val = loss_fn(pos_emb, anch_emb)
         loss_val.backward()
 
@@ -174,9 +233,41 @@ for epoch in tqdm.trange(10):
 
         opt1.step()
         opt2.step()
+        lr_scheduler_1.step()
+        lr_scheduler_2.step()
         # break
         # print(loss_val.item())
     loss_avg /= num_exp
     print(loss_avg)
 
+    model = model.eval()
+    top_3_incorrects = []
+    for i, batch in tqdm.tqdm(enumerate(val_dataloader), desc="Validating"):
+        pos, anch = batch[0].clone().detach().to(device), batch[1].clone().detach().to(device)
+        with torch.no_grad():
+            pos_emb, anch_emb = model(pos, anch)
+        
+        distances = torch.matmul(pos_emb, torch.transpose(anch_emb, 0, 1))
+        top_1_preds = torch.argmax(distances, dim=0)
+        top_1_acc = torch.sum(gold_answers==top_1_preds)
+        
+        for i in range(distances.shape[0]):
+            if i in torch.argsort(distances[:,i])[-3:]:
+                top_3_acc += 1
+            else:
+                top_3_incorrects.append(i)
 
+        accuracy = top_1_acc.item()/len(top_1_preds)
+        val_loss = loss_fn(pos_emb, anch_emb)
+        print(f"{val_loss.item()}")
+        print(f"top 1 accuracy {accuracy}")
+        print(f"top 3 accuracy {top_3_acc}")
+
+# pdb.set_trace()
+
+torch.save(model, 'fine-tuned-encoder.pt')
+
+
+
+
+        
