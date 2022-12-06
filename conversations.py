@@ -40,7 +40,8 @@ class Passage_Positive_Anchors_Negatives_Dataset(Dataset):
         # positive = self.positives[idx]
         # anchor = self.anchors[idx]
         # examples = InputExample(texts=[positive,anchor])
-        return self.positive_encodings[idx].clone().detach(), self.anchor_encodings[idx].clone().detach(), self.negative_encodings[idx].clone().detach()
+        # negs = [self.negative_encodings[i][idx] for i in range(len(self.negative_encodings))]
+        return self.positive_encodings[idx].clone().detach(), self.anchor_encodings[idx].clone().detach(), self.negative_encodings[:,idx,:].clone().detach()
 
 
 
@@ -87,44 +88,69 @@ tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
 
 dataset = HybridDialogueDataset()
 
-conversations = dataset.get_conversations(mode='train')
-candidates = dataset.get_all_candidates()
+# conversations = dataset.get_conversations(mode='train')
+# candidates = dataset.get_all_candidates()
 
-turn_ids = dataset.get_turn_ids(mode="train")
-turns = dataset.get_turns(mode="train")
+# turn_ids = dataset.get_turn_ids(mode="train")
+# turns = dataset.get_turns(mode="train")
 
-dataset.ott_data_dir = '../OTT-QA/data/combined_jsons/'
-dataset.orig_data_dir = '../OTT-QA/data/traindev_tables_tok/'
-dataset.orig_wiki_data_dir = '../OTT-QA/data/traindev_request_tok/'
+# dataset.ott_data_dir = '../OTT-QA/data/combined_jsons/'
+# dataset.orig_data_dir = '../OTT-QA/data/traindev_tables_tok/'
+# dataset.orig_wiki_data_dir = '../OTT-QA/data/traindev_request_tok/'
 
-evaluated_conversations = []
-evaluated_val_conversations = []
+# evaluated_conversations = []
+# evaluated_val_conversations = []
 
-positives = []
-negatives = []
-anchors = []
+# positives = []
+# negatives = []
+# anchors = []
 
 data_points = pd.read_csv('triplet_samples_train_new.csv')
 data_points = data_points.groupby(['history','correct_reference'])['incorrect_reference'].apply(list).reset_index(name='incorrect_reference')
 
 H = list(data_points['history'])
 C = list(data_points['correct_reference'])
-I = list(data_points['incorrect_reference'])
-
+# I = list(data_points['incorrect_reference'])
 
 # Trying to make all the negatives the same length for efficient batching later on
 len_negatives = 31
 
+# Load the negatives precomputed by utils.generate_negative_samples()
+I_padded = []
+for i in range(4):
+    with open(f'negative_samples_part_{i}.pickle', 'rb') as f:
+        temp = pickle.load(f)
+    
+    I_padded.extend(temp)
 
+neg_df = pd.DataFrame(I_padded, columns=[f'neg_{i:02d}' for i in range(31)])
+for col in neg_df.columns:
+    data_points[col] = neg_df[col]
+
+data_points = data_points.drop('incorrect_reference', axis=1)
 
 val_data_points = pd.read_csv('triplet_samples_validate_new.csv')
 val_data_points = val_data_points.groupby(['history', 'correct_reference'])['incorrect_reference'].apply(list).reset_index(name='incorrect_reference')
 
 H_val = list(val_data_points['history'])
 C_val = list(val_data_points['correct_reference'])
-I_val = list(val_data_points['incorrect_reference'])
+# I_val = list(val_data_points['incorrect_reference'])
 
+# Doing the same for validation
+I_padded_val = []
+for i in range(4):
+    with open(f'negative_samples_validate_part_{i}.pickle', 'rb') as f:
+        temp = pickle.load(f)
+    
+    I_padded_val.extend(temp)
 
+neg_df_val = pd.DataFrame(I_padded_val, columns=[f'neg_{i:02d}' for i in range(31)])
+for col in neg_df_val.columns:
+    val_data_points[col] = neg_df_val[col]
+
+val_data_points = val_data_points.drop('incorrect_reference', axis=1)
+
+# Tokenize the datasets
 neg_encodings = []
 
 print("Tokenizing...")
@@ -132,22 +158,36 @@ print("Tokenizing...")
 if precomputed:
     pos_encodings = torch.load('positive_encodings.pt')
     anchor_encodings = torch.load('anchor_encodings.pt')
-    with open('negative_encodings.pickle', 'rb') as f:
-        neg_encodings = pickle.load(f)
+    neg_encodings = torch.load('neg_encodings.pt')
+    # with open('negative_encodings.pickle', 'rb') as f:
+    #     neg_encodings = pickle.load(f)
 else:
     pos_encodings = tokenizer(C, padding="max_length", truncation=True, return_tensors='pt')['input_ids']
     anchor_encodings = tokenizer(H, padding="max_length", truncation=True, return_tensors='pt')['input_ids']
-    for item in I:
-        temp = tokenizer(item, padding="max_length", truncation=True, return_tensors='pt')['input_ids']
-        neg_encodings.append(temp)
+    for column in data_points.columns:
+        if 'neg' in column:
+            temp = tokenizer(list(data_points[column]), padding="max_length", truncation=True, return_tensors='pt')['input_ids']
+            neg_encodings.append(temp)
+
+    neg_encodings = torch.stack(neg_encodings)
+    torch.save(pos_encodings, 'positive_encodings.pt')
+    torch.save(anchor_encodings, 'anchor_encodings.pt')
+    torch.save(neg_encodings, 'neg_encodings.pt')
+
 
 val_anchor_encodings = tokenizer(H_val, padding="max_length", truncation=True, return_tensors='pt')['input_ids']
 val_pos_encodings = tokenizer(C_val, padding="max_length", truncation=True, return_tensors='pt')['input_ids']
 
 val_neg_encodings = []
-for item in I_val:
-    temp = tokenizer(item, padding="max_length", truncation=True, return_tensors='pt')['input_ids']
-    val_neg_encodings.append(temp)
+# for item in I_val:
+    # temp = tokenizer(item, padding="max_length", truncation=True, return_tensors='pt')['input_ids']
+    # val_neg_encodings.append(temp)
+for column in val_data_points.columns:
+        if 'neg' in column:
+            temp = tokenizer(list(val_data_points[column]), padding="max_length", truncation=True, return_tensors='pt')['input_ids']
+            val_neg_encodings.append(temp)
+
+val_neg_encodings = torch.stack(val_neg_encodings)
 
 print("Done Tokenizing")
 
@@ -187,12 +227,12 @@ for epoch in tqdm.trange(num_epochs):
         # opt2.zero_grad()
 
         pos,anch,neg = batch[0].clone().detach().to(device), batch[1].clone().detach().to(device),  batch[2].clone().detach().to(device)
-        if neg.shape[1] > 43:
-            neg = neg[:,:43,:]
+        # if neg.shape[1] > 43:
+        #     neg = neg[:,:43,:]
         
         pos_emb, anch_emb, neg_emb = model(pos, anch, neg)
         # pdb.set_trace()
-        loss_val = loss_fn(pos_emb, anch_emb, neg_emb)
+        loss_val = loss_fn(pos_emb, anch_emb, neg_emb, device=device)
         loss_val.backward()
 
         torch.cuda.empty_cache()
