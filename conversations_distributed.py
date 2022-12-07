@@ -8,12 +8,11 @@ import copy
 from torch.utils.data import Dataset, DataLoader 
 import torch
 import torch.nn as nn 
-from torch.optim import Adam, AdamW
+from torch.optim import Adam
 from transformers import get_scheduler
 from loss import NTXentLoss, CustomNegLoss
 import pdb
 from torch.nn.utils.rnn import pad_sequence
-import gc
 from models import PQCLR, PQNCLR
 
 utils.seed_everything(seed=42)
@@ -43,6 +42,7 @@ class Passage_Positive_Anchors_Negatives_Dataset(Dataset):
         # examples = InputExample(texts=[positive,anchor])
         # negs = [self.negative_encodings[i][idx] for i in range(len(self.negative_encodings))]
         return self.positive_encodings[idx].clone().detach(), self.anchor_encodings[idx].clone().detach(), self.negative_encodings[:,idx,:].clone().detach()
+
 
 
 precomputed = True

@@ -10,6 +10,7 @@ from torch.optim import Adam, AdamW
 from transformers import get_scheduler
 from loss import NTXentLoss
 import pdb
+from models import PQCLR, PQNCLR
 
 utils.seed_everything(seed=42)
 
@@ -26,27 +27,6 @@ class Passage_Positive_Anchors_Dataset(Dataset):
         # anchor = self.anchors[idx]
         # examples = InputExample(texts=[positive,anchor])
         return self.positive_embeddings[idx].clone().detach(), self.anchor_embeddings[idx].clone().detach()
-
-
-
-class PQCLR(nn.Module):
-    def __init__(self, device):
-        super(PQCLR, self).__init__()
-        self.passage_encoder = RobertaModel.from_pretrained('roberta-base').to(device)
-        self.question_encoder = RobertaModel.from_pretrained('roberta-base').to(device)
-    
-    def forward(self, positives, anchors):
-        # out_pos = self.passage_encoder(positives).pooler_output
-        # out_anch = self.question_encoder(anchors).pooler_output
-
-        # Using average of the output instead of cls
-        out_pos = self.passage_encoder(positives).last_hidden_state
-        out_anch = self.passage_encoder(anchors).last_hidden_state
-
-        out_pos = torch.mean(out_pos, dim=1)
-        out_anch = torch.mean(out_anch, dim=1)
-
-        return out_pos, out_anch
 
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
