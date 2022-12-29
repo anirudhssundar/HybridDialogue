@@ -8,26 +8,54 @@ import copy
 from torch.utils.data import Dataset, DataLoader 
 import torch
 import torch.nn as nn 
-from torch.optim import Adam
+from torch.optim import Adam, AdamW
 from transformers import get_scheduler
 from loss import NTXentLoss, CustomNegLoss
 import pdb
 from torch.nn.utils.rnn import pad_sequence
-from models import PQCLR, PQNCLR
+import gc
+from models import PQCLR, PQNCLR, PQNTriplet, PQNTriplet_Distributed
+
+import os
+import sys
+import tempfile
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+import torch.optim as optim
+import torch.multiprocessing as mp
+
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+
+
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+
+    # initialize the process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+def cleanup():
+    dist.destroy_process_group()
 
 utils.seed_everything(seed=42)
 
+def prepare(rank, world_size, batch_size=8, pin_memory=False, num_workers=0):
+    # dataset = Passage_Triplet_Dataset()
+    pos_encodings = torch.load('positive_triplet_encodings.pt')
+    anchor_encodings = torch.load('anchor_triple_encodings.pt')
+    neg_encodings = torch.load('neg_triplet_encodings.pt')
 
-def custom_collate_fn(batch):
-    # pdb.set_trace()
-    pos = torch.tensor([batch[i][0] for i in range(len(batch))])
-    anch = torch.tensor([batch[i][1] for i in range(len(batch))])
-    neg = torch.tensor([batch[i][2] for i in range(len(batch))])
-    padded = pad_sequence(neg, batch_first=True)
-    return (pos, anch, padded)
+    passage_dataset = Passage_Triplet_Dataset(positive_encodings=pos_encodings, anchor_encodings=anchor_encodings, negative_encodings=neg_encodings)
+    sampler = DistributedSampler(passage_dataset, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False)
+    
+    dataloader = DataLoader(passage_dataset, batch_size=batch_size, pin_memory=pin_memory, num_workers=num_workers, drop_last=False, shuffle=False, sampler=sampler)
+    
+    return dataloader
     
 
-class Passage_Positive_Anchors_Negatives_Dataset(Dataset):
+class Passage_Triplet_Dataset(Dataset):
     def __init__(self, positive_encodings, anchor_encodings, negative_encodings):
         self.positive_encodings = positive_encodings
         self.anchor_encodings = anchor_encodings
@@ -37,19 +65,31 @@ class Passage_Positive_Anchors_Negatives_Dataset(Dataset):
         return len(self.positive_encodings)
     
     def __getitem__(self, idx):
+        return self.positive_encodings[idx].clone().detach(), self.anchor_encodings[idx].clone().detach(), self.negative_encodings[idx].clone().detach()
+
+
+class Passage_Positive_Anchors_Dataset(Dataset):
+    def __init__(self, positive_embeddings, anchor_embeddings):
+        self.positive_embeddings = positive_embeddings
+        self.anchor_embeddings = anchor_embeddings
+
+    def __len__(self):
+        return len(self.positive_embeddings)
+    
+    def __getitem__(self, idx):
         # positive = self.positives[idx]
         # anchor = self.anchors[idx]
         # examples = InputExample(texts=[positive,anchor])
-        # negs = [self.negative_encodings[i][idx] for i in range(len(self.negative_encodings))]
-        return self.positive_encodings[idx].clone().detach(), self.anchor_encodings[idx].clone().detach(), self.negative_encodings[:,idx,:].clone().detach()
-
+        return self.positive_embeddings[idx].clone().detach(), self.anchor_embeddings[idx].clone().detach()
 
 
 precomputed = True
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+max_len_tokenizer = 512
+# device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
 # Compute Embeddings using Roberta
 tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
+tokenizer.model_max_length = max_len_tokenizer 
 # num_added_toks = tokenizer.add_tokens(['[PARAGRAPH]', '[CELL]', '[ROW]', '[TABLE]'])
 
 # passage_model = RobertaModel.from_pretrained('roberta-base').to(device)
@@ -57,207 +97,207 @@ tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
 # passage_model.resize_token_embeddings(len(tokenizer))
 
 
-dataset = HybridDialogueDataset()
+# dataset = HybridDialogueDataset()
 
-# conversations = dataset.get_conversations(mode='train')
-# candidates = dataset.get_all_candidates()
+# data_points = pd.read_csv('triplet_samples_train_new.csv')
 
-# turn_ids = dataset.get_turn_ids(mode="train")
-# turns = dataset.get_turns(mode="train")
-
-# dataset.ott_data_dir = '../OTT-QA/data/combined_jsons/'
-# dataset.orig_data_dir = '../OTT-QA/data/traindev_tables_tok/'
-# dataset.orig_wiki_data_dir = '../OTT-QA/data/traindev_request_tok/'
-
-# evaluated_conversations = []
-# evaluated_val_conversations = []
-
-# positives = []
-# negatives = []
-# anchors = []
-
-data_points = pd.read_csv('triplet_samples_train_new.csv')
-data_points = data_points.groupby(['history','correct_reference'])['incorrect_reference'].apply(list).reset_index(name='incorrect_reference')
-
-H = list(data_points['history'])
-C = list(data_points['correct_reference'])
+# H = list(data_points['history'])
+# C = list(data_points['correct_reference'])
 # I = list(data_points['incorrect_reference'])
 
-# Trying to make all the negatives the same length for efficient batching later on
-len_negatives = 31
 
-# Load the negatives precomputed by utils.generate_negative_samples()
-I_padded = []
-for i in range(4):
-    with open(f'negative_samples_part_{i}.pickle', 'rb') as f:
-        temp = pickle.load(f)
-    
-    I_padded.extend(temp)
-
-neg_df = pd.DataFrame(I_padded, columns=[f'neg_{i:02d}' for i in range(31)])
-for col in neg_df.columns:
-    data_points[col] = neg_df[col]
-
-data_points = data_points.drop('incorrect_reference', axis=1)
-
-val_data_points = pd.read_csv('triplet_samples_validate_new.csv')
-val_data_points = val_data_points.groupby(['history', 'correct_reference'])['incorrect_reference'].apply(list).reset_index(name='incorrect_reference')
-
-H_val = list(val_data_points['history'])
-C_val = list(val_data_points['correct_reference'])
-# I_val = list(val_data_points['incorrect_reference'])
-
-# Doing the same for validation
-I_padded_val = []
-for i in range(4):
-    with open(f'negative_samples_validate_part_{i}.pickle', 'rb') as f:
-        temp = pickle.load(f)
-    
-    I_padded_val.extend(temp)
-
-neg_df_val = pd.DataFrame(I_padded_val, columns=[f'neg_{i:02d}' for i in range(31)])
-for col in neg_df_val.columns:
-    val_data_points[col] = neg_df_val[col]
-
-val_data_points = val_data_points.drop('incorrect_reference', axis=1)
 
 # Tokenize the datasets
-neg_encodings = []
+# neg_encodings = []
 
-print("Tokenizing...")
+# print("Tokenizing...")
 
+"""
 if precomputed:
-    pos_encodings = torch.load('positive_encodings.pt')
-    anchor_encodings = torch.load('anchor_encodings.pt')
-    neg_encodings = torch.load('neg_encodings.pt')
+    pos_encodings = torch.load('positive_triplet_encodings.pt')
+    anchor_encodings = torch.load('anchor_triple_encodings.pt')
+    neg_encodings = torch.load('neg_triplet_encodings.pt')
     # with open('negative_encodings.pickle', 'rb') as f:
     #     neg_encodings = pickle.load(f)
 else:
-    pos_encodings = tokenizer(C, padding="max_length", truncation=True, return_tensors='pt')['input_ids']
-    anchor_encodings = tokenizer(H, padding="max_length", truncation=True, return_tensors='pt')['input_ids']
-    for column in data_points.columns:
-        if 'neg' in column:
-            temp = tokenizer(list(data_points[column]), padding="max_length", truncation=True, return_tensors='pt')['input_ids']
-            neg_encodings.append(temp)
+    pos_encodings = tokenizer(C, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
+    anchor_encodings = tokenizer(H, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
+    neg_encodings = tokenizer(I, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
 
-    neg_encodings = torch.stack(neg_encodings)
-    torch.save(pos_encodings, 'positive_encodings.pt')
-    torch.save(anchor_encodings, 'anchor_encodings.pt')
-    torch.save(neg_encodings, 'neg_encodings.pt')
+    torch.save(pos_encodings, 'positive_triplet_encodings.pt')
+    torch.save(anchor_encodings, 'anchor_triple_encodings.pt')
+    torch.save(neg_encodings, 'neg_triplet_encodings.pt')
+"""
 
+# val_anchor_encodings = tokenizer(H_val, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
+# val_pos_encodings = tokenizer(C_val, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
+# val_neg_encodings = tokenizer(I_val, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
 
-val_anchor_encodings = tokenizer(H_val, padding="max_length", truncation=True, return_tensors='pt')['input_ids']
-val_pos_encodings = tokenizer(C_val, padding="max_length", truncation=True, return_tensors='pt')['input_ids']
+# print("Done Tokenizing")
 
-val_neg_encodings = []
-# for item in I_val:
-    # temp = tokenizer(item, padding="max_length", truncation=True, return_tensors='pt')['input_ids']
-    # val_neg_encodings.append(temp)
-for column in val_data_points.columns:
-        if 'neg' in column:
-            temp = tokenizer(list(val_data_points[column]), padding="max_length", truncation=True, return_tensors='pt')['input_ids']
-            val_neg_encodings.append(temp)
+# passage_dataset = Passage_Triplet_Dataset(positive_encodings=pos_encodings, anchor_encodings=anchor_encodings, negative_encodings=neg_encodings)
+# val_passage_dataset = Passage_Triplet_Dataset(positive_encodings=val_pos_encodings, anchor_encodings=val_anchor_encodings, negative_encodings=val_neg_encodings)
 
-val_neg_encodings = torch.stack(val_neg_encodings)
+batch_size = 8
+num_epochs = 5
 
-print("Done Tokenizing")
+# train_dataloader = DataLoader(passage_dataset, batch_size=batch_size, shuffle=True)#, collate_fn=custom_collate_fn)
+# val_dataloader = DataLoader(val_passage_dataset, batch_size=len(val_passage_dataset), shuffle=False)#, collate_fn=custom_collate_fn)
 
-passage_dataset = Passage_Positive_Anchors_Negatives_Dataset(positive_encodings=pos_encodings, anchor_encodings=anchor_encodings, negative_encodings=neg_encodings)
-val_passage_dataset = Passage_Positive_Anchors_Negatives_Dataset(positive_encodings=val_pos_encodings, anchor_encodings=val_anchor_encodings, negative_encodings=val_neg_encodings)
-batch_size = 4
-num_epochs = 15
+# model = PQNCLR(device=device)
+# model = PQNTriplet(device=device)
+# model = model.train()
 
-train_dataloader = DataLoader(passage_dataset, batch_size=batch_size, shuffle=False)#, collate_fn=custom_collate_fn)
-val_dataloader = DataLoader(val_passage_dataset, batch_size=batch_size, shuffle=False)#, collate_fn=custom_collate_fn)
+# opt1 = Adam(model.passage_encoder.parameters(), lr=1e-6)
+# opt2 = Adam(model.question_encoder.parameters(), lr=1e-6)
 
+# num_training_steps = num_epochs * len(train_dataloader)
 
-model = PQNCLR(device=device)
-model = model.train()
+# lr_scheduler_1 = get_scheduler(name="linear", optimizer=opt1, num_warmup_steps=5, num_training_steps=num_training_steps)
+# lr_scheduler_2 = get_scheduler(name="linear", optimizer=opt2, num_warmup_steps=5, num_training_steps=num_training_steps)
 
-# if torch.cuda.device_count()>1:
-    # model = torch.nn.DataParallel(model)
+# loss_fn = nn.TripletMarginLoss(margin=1.0, p=2)
 
 
-opt1 = Adam(model.passage_encoder.parameters(), lr=1e-6)
-opt2 = Adam(model.question_encoder.parameters(), lr=1e-6)
+# torch.save(model, 'fine-tuned-qa_retriever_zero_grad_uncommented_lr_1e6_token_1024.pt')
 
-num_training_steps = num_epochs * len(train_dataloader)
+def validate(model_path):
+    val_data_points = pd.read_csv('triplet_samples_validate_new.csv')
 
-lr_scheduler_1 = get_scheduler(name="linear", optimizer=opt1, num_warmup_steps=5, num_training_steps=num_training_steps)
-lr_scheduler_2 = get_scheduler(name="linear", optimizer=opt2, num_warmup_steps=5, num_training_steps=num_training_steps)
+    print("Tokenizing...")
+    H_val = list(val_data_points['history'])
+    C_val = list(val_data_points['correct_reference'])
+    I_val = list(val_data_points['incorrect_reference'])
 
-loss_fn = CustomNegLoss(device=device, batch_size=batch_size, temperature=1, use_cosine_similarity=False, alpha_weight=1)
+    val_anchor_encodings = tokenizer(H_val, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
+    val_pos_encodings = tokenizer(C_val, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
+    val_neg_encodings = tokenizer(I_val, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
 
-for epoch in tqdm.trange(num_epochs):
-    torch.cuda.empty_cache()
-    loss_avg = 0
-    num_exp = 0
+    print("Done tokenizing")
 
-    top_3_acc = 0
-    top_1_acc = 0
+    val_passage_dataset = Passage_Triplet_Dataset(positive_encodings=val_pos_encodings, anchor_encodings=val_anchor_encodings, negative_encodings=val_neg_encodings)
+    val_dataloader = DataLoader(val_passage_dataset, batch_size=batch_size, shuffle=False)#, collate_fn=custom_collate_fn)
 
-    model = model.train()
-    for i, batch in enumerate(tqdm.tqdm((train_dataloader))):
-        torch.cuda.empty_cache()
-        # opt1.zero_grad()
-        # opt2.zero_grad()
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-        pos,anch,neg = batch[0].clone().detach().to(device), batch[1].clone().detach().to(device),  batch[2].clone().detach().to(device)
-        # if neg.shape[1] > 43:
-        #     neg = neg[:,:43,:]
-        
-        pos_emb, anch_emb, neg_emb = model(pos, anch, neg)
-        # pdb.set_trace()
-        loss_val = loss_fn(pos_emb, anch_emb, neg_emb)
-        loss_val.backward()
-
-        torch.cuda.empty_cache()
-
-        loss_avg += loss_val.item()*len(pos_emb)
-        num_exp += len(pos_emb)
-
-        # if i % 100 == 0:
-
-        opt1.step()
-        opt2.step()
-        lr_scheduler_1.step()
-        lr_scheduler_2.step()
-        # break
-        # print(loss_val.item())
-        del pos, anch, neg, pos_emb
-    loss_avg /= num_exp
-    print(loss_avg)
-
+    model = PQNTriplet_Distributed(device=device)
+    model.load_state_dict(torch.load(f'{model_path}'))
+    
+    num_less = 0
+    total_num = 0
     model = model.eval()
-    top_3_incorrects = []
+
     for i, batch in tqdm.tqdm(enumerate(val_dataloader), desc="Validating"):
         pos_val, anch_val, neg_val = batch[0].clone().detach().to(device), batch[1].clone().detach().to(device), batch[2].clone().detach().to(device)
         with torch.no_grad():
             pos_emb_val, anch_emb_val, neg_emb_val = model(pos_val, anch_val, neg_val)
+
+        pos_emb_val = torch.nn.functional.normalize(pos_emb_val, dim=1)
+        anch_emb_val = torch.nn.functional.normalize(anch_emb_val, dim=1)
+        neg_emb_val = torch.nn.functional.normalize(neg_emb_val, dim=1)
+
+        pos_dist = torch.bmm(pos_emb_val.view(pos_emb_val.shape[0], 1, pos_emb_val.shape[1]), anch_emb_val.view(anch_emb_val.shape[0],anch_emb_val.shape[1], 1))
+        neg_dist = torch.bmm(neg_emb_val.view(neg_emb_val.shape[0], 1, neg_emb_val.shape[1]), anch_emb_val.view(anch_emb_val.shape[0],anch_emb_val.shape[1], 1))
+
+        num_less += sum(pos_dist<neg_dist).item()
+        total_num += pos_dist.shape[0]
+
+    print("Val acc is; ", num_less/total_num)
+
+
+
+
+
+def main(rank, world_size):
+    setup(rank, world_size)
+    dataloader = prepare(rank, world_size, batch_size=batch_size)
+    model = PQNTriplet_Distributed(device=rank)
+    model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+
+    opt1 = Adam(model.module.passage_encoder.parameters(), lr=1e-6)
+    opt2 = Adam(model.module.question_encoder.parameters(), lr=1e-6)
+
+    num_training_steps = num_epochs * len(dataloader)
+
+    lr_scheduler_1 = get_scheduler(name="linear", optimizer=opt1, num_warmup_steps=5, num_training_steps=num_training_steps)
+    lr_scheduler_2 = get_scheduler(name="linear", optimizer=opt2, num_warmup_steps=5, num_training_steps=num_training_steps)
+
+    loss_fn = nn.TripletMarginLoss(margin=1.0, p=2)
+    device = rank
+    for epoch in tqdm.trange(num_epochs):
+        dataloader.sampler.set_epoch(epoch)
+        torch.cuda.empty_cache()
+        loss_avg = 0
+        num_exp = 0
+
+        top_3_acc = 0
+        top_1_acc = 0
+
+        model = model.train()
+        for step, batch in enumerate(tqdm.tqdm((dataloader))):
+            opt1.zero_grad(set_to_none=True)
+            opt2.zero_grad(set_to_none=True)
+
+            pos,anch,neg = batch[0], batch[1],  batch[2]
+            
+            pos_emb, anch_emb, neg_emb = model(pos, anch, neg)
+            # pdb.set_trace()
+            loss_val = loss_fn(anch_emb, pos_emb, neg_emb) # Fixed issue in ordering of elements here 
+            loss_val.backward()
+
+            loss_avg += loss_val.item()*len(pos_emb)
+            num_exp += len(pos_emb)
+
+            opt1.step()
+            opt2.step()
+            lr_scheduler_1.step()
+            lr_scheduler_2.step()
+            del pos, anch, pos_emb
+        loss_avg /= num_exp
+        print("Epoch: ", loss_avg)
+
+        # model = model.eval()
+        # top_3_incorrects = []
+        """
+        for i, batch in tqdm.tqdm(enumerate(val_dataloader), desc="Validating"):
+            pos_val, anch_val = batch[0].clone().detach().to(device), batch[1].clone().detach().to(device)
+            with torch.no_grad():
+                pos_emb_val, anch_emb_val, neg_emb_val = model(pos_val, anch_val, neg_val)
+            
+            distances = torch.matmul(pos_emb_val, torch.transpose(anch_emb_val, 0, 1))
+
+            top_1_preds = torch.argmax(distances, dim=0)
+            top_1_acc = torch.sum(gold_answers==top_1_preds)
+            
+            for j in range(distances.shape[0]):
+                if j in torch.argsort(distances[:,j])[-3:]:
+                    top_3_acc += 1
+                else:
+                    top_3_incorrects.append(i)
+
+            accuracy = top_1_acc.item()/len(top_1_preds)
+            val_loss = loss_fn(pos_emb_val, anch_emb_val)
+            print(f"{val_loss.item()}")
+            print(f"top 1 accuracy {accuracy}")
+            print(f"top 3 accuracy {top_3_acc}")
+        """
+        # pdb.set_trace()
+        torch.distributed.barrier()
+        if rank == 0:
+            torch.save(model.module.state_dict(), f'fine-tuned-qa_retriever_distributed_epoch_{epoch}_round_2.pt')
         
-        # distances = torch.matmul(pos_emb, torch.transpose(anch_emb, 0, 1))
+        validate(f'fine-tuned-qa_retriever_distributed_epoch_{epoch}_round_2.pt')
 
-        correct_dist = torch.dot(pos_emb_val[0,:], anch_emb_val[0,:]).item()
-        neg_dists = [torch.dot(anch_emb_val[0,:], neg_emb_val[i,0,:]).item() for i in range(neg_emb_val.shape[0])]
+    cleanup()
 
-        less_eq = list(map(lambda x: x<correct_dist, neg_dists))
-        if sum(less_eq)==0:
-            top_1_acc += 1
-        
-        if sum(less_eq) <3:
-            top_3_acc += 1
+    
 
-        # top_1_preds = torch.argmax(distances, dim=0)
-        # top_1_acc = torch.sum(gold_answers==top_1_preds)
-        
-        # for i in range(distances.shape[0]):
-        #    if i in torch.argsort(distances[:,i])[-3:]:
-        #        top_3_acc += 1
-        #    else:
-        #        top_3_incorrects.append(i)
 
-        #accuracy = top_1_acc.item()/len(top_1_preds)
-        #val_loss = loss_fn(pos_emb, anch_emb)
-        # print(f"{val_loss.item()}")
-        print(f"top 1 accuracy {top_1_acc}")
-        print(f"top 3 accuracy {top_3_acc}")
+if __name__ == "__main__":
+    world_size = 8
+    mp.spawn(
+        main,
+        args=(world_size,),
+        nprocs=world_size,
+        join=True
+    )
