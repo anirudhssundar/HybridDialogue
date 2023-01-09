@@ -83,6 +83,24 @@ class Passage_Positive_Anchors_Dataset(Dataset):
         return self.positive_embeddings[idx].clone().detach(), self.anchor_embeddings[idx].clone().detach()
 
 
+
+class Passage_Positive_Anchors_Negatives_Dataset(Dataset):
+    def __init__(self, positive_encodings, anchor_encodings, negative_encodings):
+        self.positive_encodings = positive_encodings
+        self.anchor_encodings = anchor_encodings
+        self.negative_encodings = negative_encodings
+
+    def __len__(self):
+        return len(self.positive_encodings)
+    
+    def __getitem__(self, idx):
+        # positive = self.positives[idx]
+        # anchor = self.anchors[idx]
+        # examples = InputExample(texts=[positive,anchor])
+        # negs = [self.negative_encodings[i][idx] for i in range(len(self.negative_encodings))]
+        return self.positive_encodings[idx].clone().detach(), self.anchor_encodings[idx].clone().detach(), self.negative_encodings[:,idx,:].clone().detach()
+
+
 precomputed = True
 max_len_tokenizer = 512
 # device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -206,6 +224,63 @@ def validate(model_path):
 
 
 
+def validate_table_wise(model_path):
+    val_data_points = pd.read_csv('triplet_samples_validate_new.csv')
+
+    print("Tokenizing...")
+    H_val = list(val_data_points['history'])
+    C_val = list(val_data_points['correct_reference'])
+    I_val = list(val_data_points['incorrect_reference'])
+
+    val_anchor_encodings = tokenizer(H_val, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
+    val_pos_encodings = tokenizer(C_val, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
+
+    I_padded_val = []
+    for i in range(4):
+        with open(f'negative_samples_validate_part_{i}.pickle', 'rb') as f:
+            temp = pickle.load(f)
+
+        I_padded_val.extend(temp)
+
+    neg_df_val = pd.DataFrame(I_padded_val, columns=[f'neg_{i:02d}' for i in range(31)])
+    for col in neg_df_val.columns:
+        val_data_points[col] = neg_df_val[col]
+
+    val_data_points = val_data_points.drop('incorrect_reference', axis=1)
+    val_neg_encodings = []
+    for column in val_data_points.columns:
+        if 'neg' in column:
+            temp = tokenizer(list(val_data_points[column]), padding="max_length", truncation=True, return_tensors='pt')['input_ids']
+            val_neg_encodings.append(temp)
+
+    val_neg_encodings = torch.stack(val_neg_encodings)
+
+    print("Done Tokenizing")
+
+    val_passage_dataset = Passage_Positive_Anchors_Negatives_Dataset(positive_encodings=val_pos_encodings, anchor_encodings=val_anchor_encodings, negative_encodings=val_neg_encodings)
+    batch_size = 1
+    val_dataloader = DataLoader(val_passage_dataset, batch_size=batch_size, shuffle=False)#, collate_fn=custom_collate_fn)
+
+    device = 'cuda' if torch.cuda.is_available else 'cpu'
+    model = PQNTriplet_Distributed(device=device)
+    model.load_state_dict(torch.load(f'{model_path}'))
+
+    for i, batch in enumerate(val_dataloader):
+        pos_val, anch_val, neg_val = batch[0].clone().detach().to(device), batch[1].clone().detach().to(device), batch[2].clone().detach().to(device)
+
+        with torch.no_grad():
+            pos_emb_val, anch_emb_val, _ = model(pos_val, anch_val, torch.zeros_like(pos_val).to(device))
+            
+            neg_emb_all = []
+            for j in range(neg_val.shape[1]):
+                temp = model.passage_encoder(neg_val[:,j,:]).last_hidden_state
+                temp = torch.mean(temp, dim=1)
+                neg_emb_all.append(temp)
+
+        break
+
+
+
 
 
 def main(rank, world_size):
@@ -286,7 +361,7 @@ def main(rank, world_size):
         if rank == 0:
             torch.save(model.module.state_dict(), f'fine-tuned-qa_retriever_distributed_epoch_{epoch}_round_2.pt')
         
-        validate(f'fine-tuned-qa_retriever_distributed_epoch_{epoch}_round_2.pt')
+        validate(f'fine-tuned-qa_retriever_distributed_epoch_{epoch}.pt')
 
     cleanup()
 
@@ -294,7 +369,7 @@ def main(rank, world_size):
 
 
 if __name__ == "__main__":
-    world_size = 8
+    world_size = 4
     mp.spawn(
         main,
         args=(world_size,),
