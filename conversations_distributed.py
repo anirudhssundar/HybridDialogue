@@ -27,7 +27,7 @@ import torch.multiprocessing as mp
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
-
+from bisect import bisect
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
@@ -156,8 +156,8 @@ else:
 # passage_dataset = Passage_Triplet_Dataset(positive_encodings=pos_encodings, anchor_encodings=anchor_encodings, negative_encodings=neg_encodings)
 # val_passage_dataset = Passage_Triplet_Dataset(positive_encodings=val_pos_encodings, anchor_encodings=val_anchor_encodings, negative_encodings=val_neg_encodings)
 
-batch_size = 8
-num_epochs = 5
+batch_size = 16
+num_epochs = 10
 
 # train_dataloader = DataLoader(passage_dataset, batch_size=batch_size, shuffle=True)#, collate_fn=custom_collate_fn)
 # val_dataloader = DataLoader(val_passage_dataset, batch_size=len(val_passage_dataset), shuffle=False)#, collate_fn=custom_collate_fn)
@@ -192,7 +192,7 @@ def validate(model_path):
     val_neg_encodings = tokenizer(I_val, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
 
     print("Done tokenizing")
-
+    batch_size = 8
     val_passage_dataset = Passage_Triplet_Dataset(positive_encodings=val_pos_encodings, anchor_encodings=val_anchor_encodings, negative_encodings=val_neg_encodings)
     val_dataloader = DataLoader(val_passage_dataset, batch_size=batch_size, shuffle=False)#, collate_fn=custom_collate_fn)
 
@@ -217,67 +217,66 @@ def validate(model_path):
         pos_dist = torch.bmm(pos_emb_val.view(pos_emb_val.shape[0], 1, pos_emb_val.shape[1]), anch_emb_val.view(anch_emb_val.shape[0],anch_emb_val.shape[1], 1))
         neg_dist = torch.bmm(neg_emb_val.view(neg_emb_val.shape[0], 1, neg_emb_val.shape[1]), anch_emb_val.view(anch_emb_val.shape[0],anch_emb_val.shape[1], 1))
 
-        num_less += sum(pos_dist<neg_dist).item()
+        num_less += sum(pos_dist>neg_dist).item()
         total_num += pos_dist.shape[0]
 
     print("Val acc is; ", num_less/total_num)
 
 
 
-def validate_table_wise(model_path):
+def validate_tables(model_path):
     val_data_points = pd.read_csv('triplet_samples_validate_new.csv')
-
-    print("Tokenizing...")
-    H_val = list(val_data_points['history'])
-    C_val = list(val_data_points['correct_reference'])
-    I_val = list(val_data_points['incorrect_reference'])
-
-    val_anchor_encodings = tokenizer(H_val, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
-    val_pos_encodings = tokenizer(C_val, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
-
-    I_padded_val = []
-    for i in range(4):
-        with open(f'negative_samples_validate_part_{i}.pickle', 'rb') as f:
-            temp = pickle.load(f)
-
-        I_padded_val.extend(temp)
-
-    neg_df_val = pd.DataFrame(I_padded_val, columns=[f'neg_{i:02d}' for i in range(31)])
-    for col in neg_df_val.columns:
-        val_data_points[col] = neg_df_val[col]
-
-    val_data_points = val_data_points.drop('incorrect_reference', axis=1)
-    val_neg_encodings = []
-    for column in val_data_points.columns:
-        if 'neg' in column:
-            temp = tokenizer(list(val_data_points[column]), padding="max_length", truncation=True, return_tensors='pt')['input_ids']
-            val_neg_encodings.append(temp)
-
-    val_neg_encodings = torch.stack(val_neg_encodings)
-
-    print("Done Tokenizing")
-
-    val_passage_dataset = Passage_Positive_Anchors_Negatives_Dataset(positive_encodings=val_pos_encodings, anchor_encodings=val_anchor_encodings, negative_encodings=val_neg_encodings)
-    batch_size = 1
-    val_dataloader = DataLoader(val_passage_dataset, batch_size=batch_size, shuffle=False)#, collate_fn=custom_collate_fn)
+    val_data_points = val_data_points.groupby(['history','correct_reference'])['incorrect_reference'].apply(list).reset_index(name='incorrect_reference')
 
     device = 'cuda' if torch.cuda.is_available else 'cpu'
     model = PQNTriplet_Distributed(device=device)
     model.load_state_dict(torch.load(f'{model_path}'))
 
-    for i, batch in enumerate(val_dataloader):
-        pos_val, anch_val, neg_val = batch[0].clone().detach().to(device), batch[1].clone().detach().to(device), batch[2].clone().detach().to(device)
+    top_1_acc = 0
+    top_3_acc = 0
+    top_10_acc = 0
+    mrr = []
+
+    for i, row in tqdm.tqdm(val_data_points.iterrows()):
+        pos = row['correct_reference']
+        neg = row['incorrect_reference']
+        anch = row['history']
+
+        pos_enc = tokenizer(pos, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids'].to(device)
+        neg_enc = tokenizer(neg, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids'].to(device)
+        anch_enc = tokenizer(anch, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids'].to(device)
 
         with torch.no_grad():
-            pos_emb_val, anch_emb_val, _ = model(pos_val, anch_val, torch.zeros_like(pos_val).to(device))
-            
-            neg_emb_all = []
-            for j in range(neg_val.shape[1]):
-                temp = model.passage_encoder(neg_val[:,j,:]).last_hidden_state
-                temp = torch.mean(temp, dim=1)
-                neg_emb_all.append(temp)
+            pos_emb_val, anch_emb_val, _ = model(pos_enc, anch_enc, torch.zeros_like(pos_enc).to(device))
+            neg_emb_val = model.passage_encoder(neg_enc).last_hidden_state
+            neg_emb_val = torch.mean(neg_emb_val, dim=1)
 
-        break
+            pos_emb_val = torch.nn.functional.normalize(pos_emb_val, dim=1)
+            anch_emb_val = torch.nn.functional.normalize(anch_emb_val, dim=1)
+            neg_emb_val = torch.nn.functional.normalize(neg_emb_val, dim=1)
+
+            negative_dists = torch.matmul(neg_emb_val, anch_emb_val.T)
+            negative_dists = negative_dists.squeeze().tolist()
+            if type(negative_dists) != list:
+                negative_dists = [negative_dists]
+            negative_dists = sorted(negative_dists)
+
+            pos_dist = torch.dot(pos_emb_val.squeeze(), anch_emb_val.squeeze().T).item()
+
+            position = bisect(negative_dists, pos_dist)
+
+            diff = len(negative_dists) - position
+
+            if position == 0:
+                top_1_acc += 1
+            
+            if position <=2:
+                top_3_acc += 1
+            
+            if position <= 9:
+                top_10_acc += 1
+            
+            mrr.append(len(negative_dists) - position + 1)
 
 
 
