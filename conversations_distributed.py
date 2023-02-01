@@ -1,7 +1,7 @@
 import utils, metrics 
 from data_api import HybridDialogueDataset, get_hash
 from transformers import RobertaTokenizer, RobertaModel
-import tqdm, pickle
+import tqdm, pickle, heapq
 import pandas as pd
 import numpy as np
 import copy
@@ -28,6 +28,9 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from bisect import bisect
+from collections import OrderedDict
+from random import shuffle 
+
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
@@ -46,6 +49,10 @@ def prepare(rank, world_size, batch_size=8, pin_memory=False, num_workers=0):
     pos_encodings = torch.load('positive_triplet_encodings.pt')
     anchor_encodings = torch.load('anchor_triple_encodings.pt')
     neg_encodings = torch.load('neg_triplet_encodings.pt')
+
+    # pos_encodings = torch.load('positive_encodings_extended.pt')
+    # anchor_encodings = torch.load('anchor_encodings_extended.pt')
+    # neg_encodings = torch.load('neg_triplet_encodings_extended.pt')
 
     passage_dataset = Passage_Triplet_Dataset(positive_encodings=pos_encodings, anchor_encodings=anchor_encodings, negative_encodings=neg_encodings)
     sampler = DistributedSampler(passage_dataset, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False)
@@ -94,90 +101,21 @@ class Passage_Positive_Anchors_Negatives_Dataset(Dataset):
         return len(self.positive_encodings)
     
     def __getitem__(self, idx):
-        # positive = self.positives[idx]
-        # anchor = self.anchors[idx]
-        # examples = InputExample(texts=[positive,anchor])
-        # negs = [self.negative_encodings[i][idx] for i in range(len(self.negative_encodings))]
         return self.positive_encodings[idx].clone().detach(), self.anchor_encodings[idx].clone().detach(), self.negative_encodings[:,idx,:].clone().detach()
 
 
 precomputed = True
+checkpoint = True
 max_len_tokenizer = 512
+CHECKPOINT_PATH = 'fine-tuned-qa_retriever_distributed_epoch_normed_3_Jan_24.pt'
+START_EPOCH = 4
 # device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
 # Compute Embeddings using Roberta
 tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
 tokenizer.model_max_length = max_len_tokenizer 
-# num_added_toks = tokenizer.add_tokens(['[PARAGRAPH]', '[CELL]', '[ROW]', '[TABLE]'])
-
-# passage_model = RobertaModel.from_pretrained('roberta-base').to(device)
-# question_model = RobertaModel.from_pretrained('roberta-base').to(device)
-# passage_model.resize_token_embeddings(len(tokenizer))
-
-
-# dataset = HybridDialogueDataset()
-
-# data_points = pd.read_csv('triplet_samples_train_new.csv')
-
-# H = list(data_points['history'])
-# C = list(data_points['correct_reference'])
-# I = list(data_points['incorrect_reference'])
-
-
-
-# Tokenize the datasets
-# neg_encodings = []
-
-# print("Tokenizing...")
-
-"""
-if precomputed:
-    pos_encodings = torch.load('positive_triplet_encodings.pt')
-    anchor_encodings = torch.load('anchor_triple_encodings.pt')
-    neg_encodings = torch.load('neg_triplet_encodings.pt')
-    # with open('negative_encodings.pickle', 'rb') as f:
-    #     neg_encodings = pickle.load(f)
-else:
-    pos_encodings = tokenizer(C, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
-    anchor_encodings = tokenizer(H, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
-    neg_encodings = tokenizer(I, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
-
-    torch.save(pos_encodings, 'positive_triplet_encodings.pt')
-    torch.save(anchor_encodings, 'anchor_triple_encodings.pt')
-    torch.save(neg_encodings, 'neg_triplet_encodings.pt')
-"""
-
-# val_anchor_encodings = tokenizer(H_val, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
-# val_pos_encodings = tokenizer(C_val, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
-# val_neg_encodings = tokenizer(I_val, padding="max_length", truncation=True, max_length=max_len_tokenizer, return_tensors='pt')['input_ids']
-
-# print("Done Tokenizing")
-
-# passage_dataset = Passage_Triplet_Dataset(positive_encodings=pos_encodings, anchor_encodings=anchor_encodings, negative_encodings=neg_encodings)
-# val_passage_dataset = Passage_Triplet_Dataset(positive_encodings=val_pos_encodings, anchor_encodings=val_anchor_encodings, negative_encodings=val_neg_encodings)
-
-batch_size = 16
+batch_size = 8
 num_epochs = 10
-
-# train_dataloader = DataLoader(passage_dataset, batch_size=batch_size, shuffle=True)#, collate_fn=custom_collate_fn)
-# val_dataloader = DataLoader(val_passage_dataset, batch_size=len(val_passage_dataset), shuffle=False)#, collate_fn=custom_collate_fn)
-
-# model = PQNCLR(device=device)
-# model = PQNTriplet(device=device)
-# model = model.train()
-
-# opt1 = Adam(model.passage_encoder.parameters(), lr=1e-6)
-# opt2 = Adam(model.question_encoder.parameters(), lr=1e-6)
-
-# num_training_steps = num_epochs * len(train_dataloader)
-
-# lr_scheduler_1 = get_scheduler(name="linear", optimizer=opt1, num_warmup_steps=5, num_training_steps=num_training_steps)
-# lr_scheduler_2 = get_scheduler(name="linear", optimizer=opt2, num_warmup_steps=5, num_training_steps=num_training_steps)
-
-# loss_fn = nn.TripletMarginLoss(margin=1.0, p=2)
-
-
-# torch.save(model, 'fine-tuned-qa_retriever_zero_grad_uncommented_lr_1e6_token_1024.pt')
 
 def validate(model_path):
     val_data_points = pd.read_csv('triplet_samples_validate_new.csv')
@@ -231,6 +169,7 @@ def validate_tables(model_path):
     device = 'cuda' if torch.cuda.is_available else 'cpu'
     model = PQNTriplet_Distributed(device=device)
     model.load_state_dict(torch.load(f'{model_path}'))
+    model = model.eval()
 
     top_1_acc = 0
     top_3_acc = 0
@@ -278,6 +217,15 @@ def validate_tables(model_path):
             
             mrr.append(len(negative_dists) - position + 1)
 
+    print("Top1", top_1_acc/807)
+    print("Top 3", top_3_acc/807)
+
+    return mrr
+
+
+
+
+            
 
 
 
@@ -286,7 +234,22 @@ def main(rank, world_size):
     setup(rank, world_size)
     dataloader = prepare(rank, world_size, batch_size=batch_size)
     model = PQNTriplet_Distributed(device=rank)
+    if checkpoint == True:
+        model.load_state_dict(torch.load(CHECKPOINT_PATH))
     model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+    
+    """
+    if checkpoint==True: # Load from previous checkpoint 
+        torch.distributed.barrier()
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+        state_dict = torch.load(CHECKPOINT_PATH, map_location=map_location)
+        new_state_dict = OrderedDict()
+        for k,v in state_dict.items():
+            new_key = 'module.'+k
+            new_state_dict[new_key] = v
+
+        model.load_state_dict(new_state_dict)
+    """
 
     opt1 = Adam(model.module.passage_encoder.parameters(), lr=1e-6)
     opt2 = Adam(model.module.question_encoder.parameters(), lr=1e-6)
@@ -315,6 +278,11 @@ def main(rank, world_size):
             pos,anch,neg = batch[0], batch[1],  batch[2]
             
             pos_emb, anch_emb, neg_emb = model(pos, anch, neg)
+            
+            # Adding in normalization to see if this affects anything 
+            pos_emb = torch.nn.functional.normalize(pos_emb, dim=1)
+            anch_emb = torch.nn.functional.normalize(anch_emb, dim=1)
+            neg_emb = torch.nn.functional.normalize(neg_emb, dim=1)
             # pdb.set_trace()
             loss_val = loss_fn(anch_emb, pos_emb, neg_emb) # Fixed issue in ordering of elements here 
             loss_val.backward()
@@ -328,39 +296,14 @@ def main(rank, world_size):
             lr_scheduler_2.step()
             del pos, anch, pos_emb
         loss_avg /= num_exp
-        print("Epoch: ", loss_avg)
+        print(f"Epoch: {epoch} Loss avg: ", loss_avg)
 
-        # model = model.eval()
-        # top_3_incorrects = []
-        """
-        for i, batch in tqdm.tqdm(enumerate(val_dataloader), desc="Validating"):
-            pos_val, anch_val = batch[0].clone().detach().to(device), batch[1].clone().detach().to(device)
-            with torch.no_grad():
-                pos_emb_val, anch_emb_val, neg_emb_val = model(pos_val, anch_val, neg_val)
-            
-            distances = torch.matmul(pos_emb_val, torch.transpose(anch_emb_val, 0, 1))
-
-            top_1_preds = torch.argmax(distances, dim=0)
-            top_1_acc = torch.sum(gold_answers==top_1_preds)
-            
-            for j in range(distances.shape[0]):
-                if j in torch.argsort(distances[:,j])[-3:]:
-                    top_3_acc += 1
-                else:
-                    top_3_incorrects.append(i)
-
-            accuracy = top_1_acc.item()/len(top_1_preds)
-            val_loss = loss_fn(pos_emb_val, anch_emb_val)
-            print(f"{val_loss.item()}")
-            print(f"top 1 accuracy {accuracy}")
-            print(f"top 3 accuracy {top_3_acc}")
-        """
-        # pdb.set_trace()
+        
         torch.distributed.barrier()
         if rank == 0:
-            torch.save(model.module.state_dict(), f'fine-tuned-qa_retriever_distributed_epoch_{epoch}_round_2.pt')
+            torch.save(model.module.state_dict(), f'fine-tuned-qa_retriever_distributed_epoch_normed_{epoch+START_EPOCH}_Jan_24.pt')
         
-        validate(f'fine-tuned-qa_retriever_distributed_epoch_{epoch}.pt')
+        # validate_tables(f'fine-tuned-qa_retriever_distributed_epoch_{epoch+START_EPOCH}_Jan_10.pt')
 
     cleanup()
 

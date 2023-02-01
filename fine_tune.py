@@ -16,7 +16,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # model = SentenceTransformer('all-MiniLM-L6-v2').to(device)
 word_embedding_model = models.Transformer('bert-base-uncased', max_seq_length=256)
 pooling_model = models.Pooling(word_embedding_model.get_word_embedding_dimension())
-model = SentenceTransformer(modules=[word_embedding_model, pooling_model])
+model = SentenceTransformer(modules=[word_embedding_model, pooling_model], device=device)
 
 
 # Set up training data
@@ -34,6 +34,7 @@ evaluator = evaluation.TripletEvaluator(anchors=history, positives=positives, ne
 
 # Fit HybriDialogue data to pre-trained SentenceBERT
 model.fit(train_objectives=[(train_dataloader, train_loss)], epochs=10, output_path='results/', warmup_steps=100, evaluator=evaluator, evaluation_steps=500, checkpoint_path='checkpoints/', checkpoint_save_steps=500, checkpoint_save_total_limit=5)
+
 
 
 

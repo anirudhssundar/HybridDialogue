@@ -88,7 +88,7 @@ len_negatives = 31
 
 # Load the negatives precomputed by utils.generate_negative_samples()
 I_padded = []
-for i in range(4):
+for i in range(4): # Split the file into 4 parts
     with open(f'negative_samples_part_{i}.pickle', 'rb') as f:
         temp = pickle.load(f)
     

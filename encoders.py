@@ -3,6 +3,8 @@ from data_api import HybridDialogueDataset, get_hash
 from transformers import RobertaTokenizer, RobertaModel
 import tqdm
 import pandas as pd
+import numpy as np
+import pickle
 from torch.utils.data import Dataset, DataLoader 
 import torch
 import torch.nn as nn 
@@ -11,6 +13,7 @@ from transformers import get_scheduler
 from loss import NTXentLoss
 import pdb
 from models import PQCLR, PQNCLR
+from rank_bm25 import BM25Okapi
 
 utils.seed_everything(seed=42)
 
@@ -80,6 +83,7 @@ val_correct_sources = utils.generate_correct_sources_list(dataset, mode='validat
 positives = []
 negatives = []
 anchors = []
+sources = []
 
 for turn_id in tqdm.tqdm(turn_ids, desc='Generating pairs'):
     turn = dataset.get_turn(turn_id)
@@ -92,6 +96,7 @@ for turn_id in tqdm.tqdm(turn_ids, desc='Generating pairs'):
     correct_candidate = candidates[turn['correct_next_cands_ids'][0]]
 
     correct_source = correct_candidate['page_key'] or correct_candidate['table_key'].rsplit('_', 1)[0]
+    sources.append(correct_candidate['page_key'] or correct_candidate['table_key'])
     correct_source = correct_source.replace("_", ' ').lower()
 
     possible_candidates = top_level_info_df[top_level_info_df['titles']==correct_source]
@@ -130,6 +135,7 @@ val_turn_ids = dataset.get_turn_ids(mode="validate")
 val_turns = dataset.get_turns(mode="validate")
 val_positives = []
 val_anchors = []
+val_sources = []
 
 for val_turn_id in tqdm.tqdm(val_turn_ids, desc='Generating pairs'):
     val_turn = dataset.get_turn(val_turn_id)
@@ -142,6 +148,7 @@ for val_turn_id in tqdm.tqdm(val_turn_ids, desc='Generating pairs'):
     correct_candidate = candidates[val_turn['correct_next_cands_ids'][0]]
 
     correct_source = correct_candidate['page_key'] or correct_candidate['table_key'].rsplit('_', 1)[0]
+    val_sources.append(correct_candidate['page_key'] or correct_candidate['table_key'])
     correct_source = correct_source.replace("_", ' ').lower()
 
     possible_candidates = top_level_info_df[top_level_info_df['titles']==correct_source]
@@ -191,6 +198,9 @@ lr_scheduler_2 = get_scheduler(name="linear", optimizer=opt2, num_warmup_steps=5
 loss_fn = NTXentLoss(device=device, batch_size=batch_size, temperature=1, use_cosine_similarity=False, alpha_weight=1)
 gold_answers = torch.arange(242).to(device)
 
+# Create a list to keep track of top 3 and extract the 2 closest retrievals to improve downstream eval
+val_top_3_list = []
+
 for epoch in tqdm.trange(num_epochs):
     loss_avg = 0
     num_exp = 0
@@ -222,6 +232,7 @@ for epoch in tqdm.trange(num_epochs):
 
     model = model.eval()
     top_3_incorrects = []
+    top_ten_reciprocal_ranks = []
     for i, batch in tqdm.tqdm(enumerate(val_dataloader), desc="Validating"):
         pos, anch = batch[0].clone().detach().to(device), batch[1].clone().detach().to(device)
         with torch.no_grad():
@@ -231,23 +242,87 @@ for epoch in tqdm.trange(num_epochs):
         top_1_preds = torch.argmax(distances, dim=0)
         top_1_acc = torch.sum(gold_answers==top_1_preds)
         
-        for i in range(distances.shape[0]):
-            if i in torch.argsort(distances[:,i])[-3:]:
+        for j in range(distances.shape[0]):
+            if j in torch.argsort(distances[:,j])[-3:]:
                 top_3_acc += 1
             else:
-                top_3_incorrects.append(i)
+                top_3_incorrects.append(j)
+            
+            if j in torch.argsort(distances[:,j])[-10:]:
+                reversed_positions = torch.flip(torch.argsort(distances[:,j])[-10:],dims=(0,)) # Make it so the top retrieved is first
+                position = (reversed_positions==j).nonzero().item() +1
+                top_ten_reciprocal_ranks.append(1/position)
+
+                closest_3_negs = reversed_positions[:4].tolist()
+                if j in closest_3_negs:
+                    closest_3_negs.remove(j)
+                else:
+                    closest_3_negs = closest_3_negs[:3]
+                val_top_3_list.append(closest_3_negs)
+
+            else : 
+                top_ten_reciprocal_ranks.append(0)
+            
 
         accuracy = top_1_acc.item()/len(top_1_preds)
         val_loss = loss_fn(pos_emb, anch_emb)
         print(f"{val_loss.item()}")
         print(f"top 1 accuracy {accuracy}")
-        print(f"top 3 accuracy {top_3_acc}")
+        print(f"top 3 accuracy {top_3_acc/pos.shape[0]}")
 
 # pdb.set_trace()
 
 torch.save(model, 'fine-tuned-encoder.pt')
+with open('closest_3_negs.pickle', 'wb') as f:
+    pickle.dump(val_top_3_list, f)
 
 
 
 
-        
+# BM25 evaluation 
+"""
+corpus = val_positives
+tokenized_corpus = [doc.split(" ") for doc in corpus]
+bm25 = BM25Okapi(tokenized_corpus)
+
+bm25_top_10s = []
+
+queries = val_anchors
+for i,query in enumerate(queries):
+    tokenized_query = query.split(" ")
+    top_10 = bm25.get_top_n(tokenized_query, corpus, n=10)
+    
+    if corpus[i] in top_10:
+        position = top_10.index(corpus[i])
+        bm25_top_10s.append(1/(position+1))
+    else:
+        bm25_top_10s.append(0)
+"""
+
+# BM25 get top 3 from training data
+
+corpus = positives
+tokenized_corpus = [doc.split(" ") for doc in corpus]
+bm25 = BM25Okapi(tokenized_corpus)
+
+bm25_top_3s = []
+
+queries = anchors
+for i,query in tqdm.tqdm(enumerate(queries)):
+    tokenized_query = query.split(" ")
+    top_3 = bm25.get_top_n(tokenized_query, corpus, n=4)
+    
+    if corpus[i] in top_3:
+        top_3.remove(corpus[i])
+    else:
+        top_3 = top_3[:3]
+
+    top_3_indices = list(map(lambda x: sources[positives.index(x)], top_3))
+    bm25_top_3s.append(top_3_indices)
+
+    # if corpus[i] in top_3:
+    #     position = top_3.index(corpus[i])
+    #     bm25_top_3s.append(1/(position+1))
+    # else:
+    #     bm25_top_3s.append(0)
+
