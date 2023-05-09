@@ -815,3 +815,54 @@ def generate_dialogue_response_top_1s(model_path, mode='train'):
         
         return dialogue_data_points 
 
+
+
+def get_table_cells_from_first_turn(dataset, tokenizer, mode='train'):
+    # Function to get the rows of a table (going to use this to go from table retrieval to knowledge retrieval)
+    conversations = dataset.get_conversations(mode=mode)
+    candidates = dataset.get_all_candidates()
+    turn_ids = dataset.get_turn_ids(mode=mode)
+    turns = dataset.get_turns(mode=mode)
+
+    # data_points = []
+    data_points = pd.DataFrame()
+
+    history = [] # dialogue history
+    correct_reference_all = [] # Correct references
+    incorrect_reference_all = [] # Incorrect references
+
+    sources = []
+    all_references = []
+
+    for key, turn_keys in tqdm.tqdm(conversations.items()):
+        dialogue_history = ''
+        references = []
+        for i,turn_key in enumerate(turn_keys):
+            if i == 0:
+                turn = turns[turn_key]
+                correct_candidate = candidates[turn['correct_next_cands_ids'][0]]
+                correct_source = correct_candidate['page_key'] or correct_candidate['table_key'].rsplit('_', 1)[0]
+                sources.append(correct_source)
+
+            else: 
+                turn = turns[turn_key]
+
+                correct_reference = turn['correct_next_cands_ids'][0]
+                correct_reference_linearized = candidates[correct_reference]['linearized_input']
+                references.append(correct_reference_linearized)
+                incorrect_references = turn['possible_next_cands_ids']
+                # print(incorrect_references)
+                if correct_reference in incorrect_references:
+                    incorrect_references.remove(correct_reference)
+
+                for incorrect_reference in incorrect_references:
+                    incorrect_reference_linearized = candidates[incorrect_reference]['linearized_input']
+                    references.append(incorrect_reference_linearized)
+                    # correct_reference_all.append(correct_reference_linearized)
+                    # ncorrect_reference_all.append(incorrect_reference_linearized)
+
+        all_references.append(list(set(references)))
+
+    data_points['sources'] = sources
+    data_points['references'] = all_references
+    return data_points

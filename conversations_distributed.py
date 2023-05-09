@@ -162,9 +162,14 @@ def validate(model_path):
 
 
 
-def validate_tables(model_path):
-    val_data_points = pd.read_csv('triplet_samples_validate_new.csv')
-    val_data_points = val_data_points.groupby(['history','correct_reference'])['incorrect_reference'].apply(list).reset_index(name='incorrect_reference')
+def validate_tables(model_path, mode='validate'):
+    if mode == 'validate':
+        val_data_points = pd.read_csv('triplet_samples_validate_new.csv')
+        val_data_points = val_data_points.groupby(['history','correct_reference'])['incorrect_reference'].apply(list).reset_index(name='incorrect_reference')
+    
+    elif mode == 'test':
+        val_data_points = pd.read_csv('triplet_samples_test_new.csv')
+        val_data_points = val_data_points.groupby(['history','correct_reference', 'responses'])['incorrect_reference'].apply(list).reset_index(name='incorrect_reference')
 
     device = 'cuda' if torch.cuda.is_available else 'cpu'
     model = PQNTriplet_Distributed(device=device)
@@ -217,8 +222,8 @@ def validate_tables(model_path):
             
             mrr.append(len(negative_dists) - position + 1)
 
-    print("Top1", top_1_acc/807)
-    print("Top 3", top_3_acc/807)
+    # print("Top1", top_1_acc/807)
+    # print("Top 3", top_3_acc/807)
 
     return mrr
 

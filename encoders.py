@@ -77,7 +77,7 @@ top_level_info_df = utils.create_table_top_level_info(dataset) # pandas df conta
 
 correct_sources = utils.generate_correct_sources_list(dataset, mode='train')
 val_correct_sources = utils.generate_correct_sources_list(dataset, mode='validate')
-
+test_correct_sources = utils.generate_correct_sources_list(dataset, mode='test')
 # Generate the contrastive pairs for learning embeddings 
 
 positives = []
@@ -130,12 +130,26 @@ for turn_id in tqdm.tqdm(turn_ids, desc='Generating pairs'):
     # repeated_query = [query]*len(incorrect_sources) # Repeat to number of negatives
     # anchors.extend(repeated_query)
 
-val_conversations = dataset.get_conversations(mode='validate')
-val_turn_ids = dataset.get_turn_ids(mode="validate")
-val_turns = dataset.get_turns(mode="validate")
-val_positives = []
-val_anchors = []
-val_sources = []
+eval_mode = 'test'
+
+if eval_mode == 'validate':
+    val_conversations = dataset.get_conversations(mode='validate')
+    val_turn_ids = dataset.get_turn_ids(mode="validate")
+    val_turns = dataset.get_turns(mode="validate")
+    val_positives = []
+    val_anchors = []
+    val_sources = []
+
+
+if eval_mode == 'test':
+    val_conversations = dataset.get_conversations(mode='test')
+    val_turn_ids = dataset.get_turn_ids(mode="test")
+    val_turns = dataset.get_turns(mode="test")
+    val_positives = []
+    val_anchors = []
+    val_sources = []
+
+
 
 for val_turn_id in tqdm.tqdm(val_turn_ids, desc='Generating pairs'):
     val_turn = dataset.get_turn(val_turn_id)
@@ -196,7 +210,9 @@ lr_scheduler_1 = get_scheduler(name="linear", optimizer=opt1, num_warmup_steps=5
 lr_scheduler_2 = get_scheduler(name="linear", optimizer=opt2, num_warmup_steps=5, num_training_steps=num_training_steps)
 
 loss_fn = NTXentLoss(device=device, batch_size=batch_size, temperature=1, use_cosine_similarity=False, alpha_weight=1)
-gold_answers = torch.arange(242).to(device)
+
+# gold_answers = torch.arange(242).to(device)
+gold_answers = torch.arange(len(val_passage_dataset)).to(device)
 
 # Create a list to keep track of top 3 and extract the 2 closest retrievals to improve downstream eval
 val_top_3_list = []
@@ -312,13 +328,13 @@ for i,query in tqdm.tqdm(enumerate(queries)):
     tokenized_query = query.split(" ")
     top_3 = bm25.get_top_n(tokenized_query, corpus, n=4)
     
-    if corpus[i] in top_3:
-        top_3.remove(corpus[i])
-    else:
-        top_3 = top_3[:3]
+    # if corpus[i] in top_3:
+    #     top_3.remove(corpus[i])
+    # else:
+    #     top_3 = top_3[:3]
 
-    top_3_indices = list(map(lambda x: sources[positives.index(x)], top_3))
-    bm25_top_3s.append(top_3_indices)
+    # top_3_indices = list(map(lambda x: sources[positives.index(x)], top_3))
+    # bm25_top_3s.append(top_3_indices)
 
     # if corpus[i] in top_3:
     #     position = top_3.index(corpus[i])
@@ -326,3 +342,18 @@ for i,query in tqdm.tqdm(enumerate(queries)):
     # else:
     #     bm25_top_3s.append(0)
 
+positions = []
+queries = val_anchors
+corpus = val_positives
+tokenized_corpus = [doc.split(" ") for doc in corpus]
+bm25 = BM25Okapi(tokenized_corpus)
+for i,query in tqdm.tqdm(enumerate(queries)):
+    tokenized_query = query.split(" ")
+    top_3 = bm25.get_top_n(tokenized_query, corpus, n=10)
+
+    if corpus[i] in top_3:
+        position = top_3.index(corpus[i])
+        positions.append(position)
+        bm25_top_3s.append(1/(position+1))
+    else:
+        bm25_top_3s.append(0)
